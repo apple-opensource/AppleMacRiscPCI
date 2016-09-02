@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -49,8 +46,8 @@
 
 #include "AppleMacRiscPCI.h"
 
-#define NO_FASTWRITE		0
-#define NO_NVIDIA_FASTWRITE	0
+#define NO_FASTWRITE		1
+#define NO_NVIDIA_FASTWRITE	1
 
 #define ALLOC_AGP_RANGE		0
 
@@ -115,8 +112,11 @@ bool AppleMacRiscPCI::start( IOService * provider )
     {
         tmpData = OSDynamicCast(OSData, uniNRegEntry->getProperty("device-rev"));
         if (tmpData)
+		{
             uniNVersion = *(long *)tmpData->getBytesNoCopy();
 	uniNRegEntry->release();
+			//uniNVersion &= 0x3f;
+		}
     }
             
     bridge = provider;
@@ -697,8 +697,19 @@ bool AppleMacRiscAGP::configure( IOService * provider )
 
     isU3 = IODTMatchNubWithKeys(provider, "u3-agp");
     if (isU3) {
-	gartCtrl |= kGART_PERF_RD;
-	isU32     = (uniNVersion > 0x30);
+	
+        uniNVersion &= 0x3f;
+
+        gartCtrl |= kGART_PERF_RD;
+	
+        if(uniNVersion > 0x33)
+        {
+            /* B2B_GNT seems broken on U3 Twins */
+            //gartCtrl |= kGART_B2B_GNT;
+            //gartCtrl |= kGART_FAST_DDR;
+        }
+	
+        isU32     = (uniNVersion > 0x30);
     }
 
     return( super::configure( provider));
@@ -739,7 +750,7 @@ IOPCIDevice * AppleMacRiscAGP::createNub( OSDictionary * from )
 	    flags &= ~kIOAGPGartInvalidate;
 	else
 	    flags |= kIOAGPGartInvalidate;
-#if 1
+#if 0
 	if (isU3 || (uniNVersion < 0x08))
 	    flags |= kIOAGPDisablePageSpans;
 #else
@@ -802,9 +813,6 @@ IOReturn AppleMacRiscAGP::createAGPSpace( IOAGPDevice * master,
     if (isU3)
 	agpCommandMask &= ~kIOAGPFastWrite;
 
-#if NO_FASTWRITE
-    agpCommandMask &= ~kIOAGPFastWrite;
-#else	/* NO_FASTWRITE */
     {
 	// There's an nVidia NV11 ROM (revision 1017) that says that it can do fast writes,
 	// but can't, and can often lock the machine up when fast writes are enabled.
@@ -816,7 +824,11 @@ IOReturn AppleMacRiscAGP::createAGPSpace( IOAGPDevice * master,
 #if NO_NVIDIA_FASTWRITE
 
 	if( 0 == strncmp( kNVIDIAEntryName, master->getName(), strlen(kNVIDIAEntryName)))
-	    agpCommandMask &= ~kIOAGPFastWrite;
+        {
+	    agpCommandMask &= ~kIOAGPFastWrite;			// NV34 systems (Q26B/Q54) has issues with this
+	    if (!isU3)
+		agpCommandMask &= ~kIOAGPSideBandAddresssing;	// NV34 systems (Q26B/Q54) has issues with this
+        }
 
 #else	/* NO_NVIDIA_FASTWRITE */
 
@@ -829,6 +841,9 @@ IOReturn AppleMacRiscAGP::createAGPSpace( IOAGPDevice * master,
 
 #endif	/* !NO_NVIDIA_FASTWRITE */
     }
+
+#if NO_FASTWRITE
+    agpCommandMask &= ~kIOAGPFastWrite;
 #endif	/* !NO_FASTWRITE */
 
     if ((data = OSDynamicCast(OSData, getProvider()->getProperty("AAPL,agp-clear"))))
@@ -1183,8 +1198,13 @@ IOReturn AppleMacRiscAGP::setAGPEnable( IOAGPDevice * _master,
 
 	if( targetStatus > masterStatus)
 	    targetStatus = masterStatus;
-	command |= (targetStatus & kIOAGPRequestQueueMask);
-
+        
+        if((uniNVersion >= 0x30) && (uniNVersion <= 0x33))
+            // We neeed to set the REQ_DEPTH to 7 for U3 versions V1.0, V2.1, V2.2 and V2.3.
+            command |= 0x07000000;
+        else
+            command |= (targetStatus & kIOAGPRequestQueueMask);
+        
         _master->setProperty(kIOAGPCommandValueKey, &command, sizeof(command));
 
         configWrite32( target, kUniNGART_CTRL, gartCtrl | kGART_EN );
